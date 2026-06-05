@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HealthKit Relay Dashboard 📱⚡</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="glow-container">
+    <div class="glow-orb orb-primary"></div>
+    <div class="glow-orb orb-secondary"></div>
+  </div>
+
+  <div class="container">
+    <!-- Header -->
+    <header class="dashboard-header">
+      <div class="logo-area">
+        <span class="logo-icon">⚡</span>
+        <h1>HealthKit Relay</h1>
+      </div>
+      <div class="status-indicator">
+        <span class="pulse-dot"></span>
+        <span id="connection-text">Connecting to server...</span>
+      </div>
+    </header>
+
+    <!-- Empty State -->
+    <div id="empty-state" class="card empty-state-card active">
+      <div class="empty-icon">⌚</div>
+      <h2>Waiting for Apple Health Data</h2>
+      <p>The webhook server is active and listening. Trigger your iOS Shortcut to sync your metrics (Steps, Active Energy, Workouts) to this screen.</p>
+      <div class="api-help-box">
+        <p>Ensure your shortcut points to: <code id="local-endpoint-hint">http://YOUR_IP:3000/api/webhook/apple-health</code></p>
+      </div>
+    </div>
+
+    <!-- Active Dashboard (Hidden until data is received) -->
+    <div id="dashboard-content" class="dashboard-grid">
+      <!-- Device & Sync Info -->
+      <div class="card full-width info-card">
+        <div class="info-item">
+          <span class="info-label">Connected Device</span>
+          <span id="device-name" class="info-val">Loading...</span>
+        </div>
+        <div class="info-item">
+          <span class="info-label">Last Sync Time</span>
+          <span id="sync-time" class="info-val">Loading...</span>
+        </div>
+      </div>
+
+      <!-- Steps Card -->
+      <div class="card metric-card steps-theme">
+        <div class="card-header">
+          <span class="metric-icon">👣</span>
+          <h3>Daily Steps</h3>
+        </div>
+        <div class="metric-body">
+          <div class="metric-value-container">
+            <span id="step-value" class="metric-value">0</span>
+            <span class="metric-unit">steps</span>
+          </div>
+          <div class="progress-container">
+            <div class="progress-bar">
+              <div id="step-progress" class="progress-fill" style="width: 0%;"></div>
+            </div>
+            <div class="progress-stats">
+              <span id="step-pct">0% of daily goal (10,000)</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Active Energy Card -->
+      <div class="card metric-card energy-theme">
+        <div class="card-header">
+          <span class="metric-icon">🔥</span>
+          <h3>Active Energy</h3>
+        </div>
+        <div class="metric-body">
+          <div class="metric-value-container">
+            <span id="energy-value" class="metric-value">0</span>
+            <span class="metric-unit">kcal</span>
+          </div>
+          <div class="progress-container">
+            <div class="progress-bar">
+              <div id="energy-progress" class="progress-fill" style="width: 0%;"></div>
+            </div>
+            <div class="progress-stats">
+              <span id="energy-pct">0% of daily goal (500)</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Workouts Section -->
+      <div class="card workouts-card">
+        <div class="card-header">
+          <span class="metric-icon">🏃</span>
+          <h3>Recent Workouts</h3>
+        </div>
+        <div class="workouts-container">
+          <div id="workouts-list" class="workouts-list">
+            <!-- Dynamically populated -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Real-Time Console Logs -->
+      <div class="card console-card full-width">
+        <div class="card-header">
+          <div class="console-header-left">
+            <span class="metric-icon">💻</span>
+            <h3>Live JSON Stream</h3>
+          </div>
+          <div class="live-flash" id="log-flash">NEW EVENT</div>
+        </div>
+        <div class="console-body">
+          <pre><code id="console-output">{ "status": "Waiting for incoming webhook events..." }</code></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const emptyState = document.getElementById('empty-state');
+    const dashboardContent = document.getElementById('dashboard-content');
+    const connectionText = document.getElementById('connection-text');
+    const pulseDot = document.querySelector('.pulse-dot');
+    const logFlash = document.getElementById('log-flash');
+
+    // Dynamically show the local IP suggestion in empty state
+    document.getElementById('local-endpoint-hint').textContent = `http://${window.location.hostname}:${window.location.port || '3000'}/api/webhook/apple-health`;
+
+    // Initialize EventSource for Server-Sent Events (SSE)
+    const eventSource = new EventSource('/api/webhook/apple-health/stream');
+
+    eventSource.onopen = () => {
+      connectionText.textContent = "Live Stream Connected";
+      pulseDot.classList.add('online');
+      pulseDot.classList.remove('offline');
+    };
+
+    eventSource.onerror = (e) => {
+      connectionText.textContent = "Offline. Reconnecting...";
+      pulseDot.classList.remove('online');
+      pulseDot.classList.add('offline');
+    };
+
+    eventSource.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      console.log('SSE message received:', message);
+
+      if (message.type === 'connected' && message.data) {
+        updateDashboard(message.data);
+      } else if (message.type === 'update' && message.data) {
+        updateDashboard(message.data);
+        triggerLogFlash();
+      }
+    };
+
+    function triggerLogFlash() {
+      logFlash.classList.add('active');
+      setTimeout(() => {
+        logFlash.classList.remove('active');
+      }, 1500);
+    }
+
+    function updateDashboard(data) {
+      if (!data || !data.metrics) return;
+
+      // Hide empty state and show dashboard
+      emptyState.classList.remove('active');
+      dashboardContent.classList.add('active');
+
+      // Update Device and Sync time
+      document.getElementById('device-name').textContent = data.device || 'iOS Device';
+      
+      const syncDate = new Date(data.timestamp);
+      document.getElementById('sync-time').textContent = syncDate.toLocaleString();
+
+      // Update Steps
+      if (data.metrics.steps) {
+        const steps = data.metrics.steps.value;
+        animateNumber('step-value', steps);
+        
+        const goal = 10000;
+        const pct = Math.min((steps / goal) * 100, 100);
+        document.getElementById('step-progress').style.width = `${pct}%`;
+        document.getElementById('step-pct').textContent = `${Math.round(steps / goal * 100)}% of daily goal (${goal.toLocaleString()})`;
+      }
+
+      // Update Active Calories
+      if (data.metrics.activeEnergy) {
+        const energy = data.metrics.activeEnergy.value;
+        animateNumber('energy-value', Math.round(energy));
+
+        const goal = 500;
+        const pct = Math.min((energy / goal) * 100, 100);
+        document.getElementById('energy-progress').style.width = `${pct}%`;
+        document.getElementById('energy-pct').textContent = `${Math.round(energy / goal * 100)}% of daily goal (${goal} kcal)`;
+      }
+
+      // Update Workouts
+      const workoutsList = document.getElementById('workouts-list');
+      workoutsList.innerHTML = '';
+
+      const workouts = data.workouts || [];
+      if (workouts.length === 0) {
+        workoutsList.innerHTML = `
+          <div class="no-workouts">
+            <p>No workout sessions recorded in this sync.</p>
+          </div>
+        `;
+      } else {
+        workouts.forEach(workout => {
+          const durationMin = Math.round(workout.durationSeconds / 60);
+          const workoutEl = document.createElement('div');
+          workoutEl.className = 'workout-item';
+          
+          let subDetails = `⚡ ${durationMin} mins`;
+          if (workout.activeEnergyBurned) {
+            subDetails += ` | 🔥 ${Math.round(workout.activeEnergyBurned.value)} ${workout.activeEnergyBurned.unit}`;
+          }
+          if (workout.distance) {
+            subDetails += ` | 📍 ${workout.distance.value.toFixed(2)} ${workout.distance.unit}`;
+          }
+
+          workoutEl.innerHTML = `
+            <div class="workout-info">
+              <div class="workout-title-row">
+                <span class="workout-badge">${getWorkoutIcon(workout.type)}</span>
+                <span class="workout-name">${workout.type}</span>
+              </div>
+              <span class="workout-details">${subDetails}</span>
+            </div>
+            <div class="workout-time">
+              <span>${formatWorkoutTime(workout.startDate)}</span>
+            </div>
+          `;
+          workoutsList.appendChild(workoutEl);
+        });
+      }
+
+      // Update JSON log
+      document.getElementById('console-output').textContent = JSON.stringify(data, null, 2);
+    }
+
+    function animateNumber(id, endValue) {
+      const el = document.getElementById(id);
+      const startValue = parseInt(el.textContent.replace(/,/g, '')) || 0;
+      if (startValue === endValue) return;
+
+      const duration = 1000;
+      const startTime = performance.now();
+
+      function update(now) {
+        const elapsed = now - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        const ease = 1 - Math.pow(1 - progress, 3); // Ease Out Cubic
+        const current = Math.floor(startValue + (endValue - startValue) * ease);
+        el.textContent = current.toLocaleString();
+
+        if (progress < 1) {
+          requestAnimationFrame(update);
+        }
+      }
+      requestAnimationFrame(update);
+    }
+
+    function getWorkoutIcon(type) {
+      const t = type.toLowerCase();
+      if (t.includes('run')) return '🏃';
+      if (t.includes('walk')) return '🚶';
+      if (t.includes('cycl') || t.includes('bike')) return '🚴';
+      if (t.includes('swim')) return '🏊';
+      if (t.includes('yoga')) return '🧘';
+      if (t.includes('strength') || t.includes('lift')) return '🏋️';
+      return '💪';
+    }
+
+    function formatWorkoutTime(dateStr) {
+      try {
+        const d = new Date(dateStr);
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      } catch (e) {
+        return '';
+      }
+    }
+  </script>
+</body>
+</html>

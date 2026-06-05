@@ -25,7 +25,20 @@ const app = express();
 // ==========================================
 
 // Helmet helps secure Express apps by setting various HTTP headers
-app.use(helmet());
+// In development/local dashboard serving, we configure Content Security Policy (CSP) options
+// to allow inline styles/fonts from Google Fonts and prevent stream resource blocking.
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+        "style-src": ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+        "font-src": ["'self'", "https://fonts.gstatic.com"],
+        "connect-src": ["'self'", "http://localhost:3000", "http://127.0.0.1:3000"]
+      },
+    },
+  })
+);
 
 // Enable CORS for cross-origin client requests
 app.use(cors());
@@ -33,12 +46,26 @@ app.use(cors());
 // Parse incoming JSON payloads (up to 10MB to accommodate large workout files if needed)
 app.use(express.json({ limit: '10mb' }));
 
+// Serve static dashboard files from the "public" directory
+app.use(express.static('public'));
+
 // Logger middleware to print basic request information
 app.use((req: Request, _res: Response, next: NextFunction) => {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] ${req.method} ${req.path} - IP: ${req.ip}`);
   next();
 });
+
+// ==========================================
+// Real-time State & SSE Clients
+// ==========================================
+interface SSEClient {
+  id: number;
+  res: Response;
+}
+
+let sseClients: SSEClient[] = [];
+let latestPayload: AppleHealthPayload | null = null;
 
 // ==========================================
 // Authentication Middleware
@@ -134,6 +161,38 @@ app.get('/health', (_req: Request, res: Response) => {
 });
 
 /**
+ * Get the latest received Apple Health payload (cached in-memory)
+ */
+app.get('/api/webhook/apple-health/latest', (_req: Request, res: Response) => {
+  res.status(200).json(latestPayload);
+});
+
+/**
+ * Server-Sent Events (SSE) stream to push real-time updates to the dashboard
+ */
+app.get('/api/webhook/apple-health/stream', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  // Immediately send connection confirmation and cached data
+  res.write(`data: ${JSON.stringify({ type: 'connected', data: latestPayload })}\n\n`);
+
+  const client: SSEClient = {
+    id: Date.now(),
+    res,
+  };
+
+  sseClients.push(client);
+
+  // Remove connection on client disconnect
+  req.on('close', () => {
+    sseClients = sseClients.filter((c) => c.id !== client.id);
+  });
+});
+
+/**
  * Primary webhook receiver endpoint for Apple Health data
  */
 app.post(
@@ -207,6 +266,18 @@ app.post(
       });
     }
     console.log('================================================================\n');
+
+    // Cache the latest payload in memory
+    latestPayload = payload;
+
+    // Broadcast the update to all connected dashboard client streams
+    sseClients.forEach((client) => {
+      try {
+        client.res.write(`data: ${JSON.stringify({ type: 'update', data: payload })}\n\n`);
+      } catch (err) {
+        console.error('Failed to write to client SSE stream:', err);
+      }
+    });
 
     // Respond back to the Shortcut to confirm receipt
     res.status(200).json({
